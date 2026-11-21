@@ -668,6 +668,22 @@ def cmd_patrol(pool):
         print("patrol: all quiet")
 
 
+def account_email(acct_id):
+    """Email from the account's stored id_token claims, if available."""
+    auth_path, tokens_path = acct_paths(acct_id)
+    for path, key in ((tokens_path, None), (auth_path, "tokens")):
+        try:
+            data = load_json(path)
+            if key:
+                data = data.get(key) or {}
+            claims = jwt_claims(data.get("id_token"))
+            if claims.get("email"):
+                return claims["email"]
+        except Exception:
+            continue
+    return None
+
+
 def cmd_status_json(pool):
     out = {"active": pool["active"], "accounts": []}
     for a in sorted(pool["accounts"], key=lambda x: x["priority"]):
@@ -675,6 +691,7 @@ def cmd_status_json(pool):
         entry = {
             "id": a["id"],
             "account": mask(a["account_id"]),
+            "email": account_email(a["id"]),
             "priority": a["priority"],
             "state": a["state"],
             "is_active": a["id"] == pool["active"],
