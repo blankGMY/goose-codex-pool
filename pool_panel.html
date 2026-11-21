@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT 账号池</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px 16px;
+    font-family: var(--font-sans, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
+    background: var(--color-background-primary, #ffffff);
+    color: var(--color-text-primary, #1a1a1a);
+    font-size: 14px;
+  }
+  .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .title { font-size: 16px; font-weight: 700; }
+  button {
+    font: inherit; font-size: 13px; cursor: pointer;
+    border: 1px solid var(--color-border-primary, #d4d4d4);
+    background: var(--color-background-secondary, #f4f4f5);
+    color: var(--color-text-primary, #1a1a1a);
+    border-radius: 8px; padding: 5px 12px;
+  }
+  button:hover:not(:disabled) { filter: brightness(0.97); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.danger { color: #c0362c; border-color: #c0362c; }
+  button.confirm { background: #c0362c; color: #fff; border-color: #c0362c; }
+  .acct {
+    border: 1px solid var(--color-border-primary, #e2e2e2);
+    border-radius: 12px; padding: 10px 12px; margin-bottom: 10px;
+    background: var(--color-background-primary, #fff);
+  }
+  .line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .aid { font-weight: 700; }
+  .masked { color: var(--color-text-secondary, #6b7280); font-size: 12px; }
+  .chip {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--color-border-primary, #d4d4d4);
+    color: var(--color-text-secondary, #6b7280);
+  }
+  .chip.on { color: #0e6b6e; border-color: #0e6b6e; font-weight: 700; }
+  .chip.parked { color: #c0362c; border-color: #c0362c; }
+  .note { color: var(--color-text-secondary, #6b7280); font-size: 12px; }
+  .win { display: flex; align-items: center; gap: 8px; margin-top: 7px; font-size: 12px; color: var(--color-text-secondary, #6b7280); }
+  .win .lab { flex: 0 0 64px; }
+  .bar { flex: 1; height: 8px; border-radius: 999px; background: var(--color-background-secondary, #ececf1); overflow: hidden; }
+  .fill { height: 100%; background: #0e6b6e; border-radius: 999px; }
+  .fill.warn { background: #d97706; }
+  .fill.bad { background: #c0362c; }
+  .win .num { flex: 0 0 38px; text-align: right; color: var(--color-text-primary, #1a1a1a); }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .msg { margin-top: 8px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .msg.err { color: #c0362c; }
+  .addbox {
+    border: 1px dashed var(--color-border-primary, #c9c9c9); border-radius: 12px;
+    padding: 12px; margin-top: 4px; display: none;
+  }
+  .addbox.open { display: block; }
+  .code { font-size: 26px; font-weight: 800; letter-spacing: 2px; margin: 8px 0; }
+  .muted { color: var(--color-text-secondary, #6b7280); }
+  #status { min-height: 18px; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <span class="title">GPT 账号池</span>
+    <button id="refreshBtn">刷新</button>
+  </div>
+  <div id="status" class="msg muted">加载中…</div>
+  <div id="list"></div>
+  <button id="addBtn">＋ 添加账号</button>
+  <div id="addBox" class="addbox">
+    <div class="muted">在打开的页面登录你要添加的账号，输入这个代码：</div>
+    <div class="code" id="addCode">…</div>
+    <div class="actions">
+      <button id="openAuthBtn">打开授权页</button>
+      <button id="finishAddBtn">我已授权，完成添加</button>
+      <button id="cancelAddBtn">取消</button>
+    </div>
+    <div id="addMsg" class="msg"></div>
+  </div>
+
+<script>
+"use strict";
+// ── Minimal MCP Apps bridge (same wire protocol as the hosts expect) ──
+var _nextId = 1;
+var _pending = {};
+function sendRequest(method, params) {
+  return new Promise(function (resolve, reject) {
+    var id = _nextId++;
+    _pending[id] = { resolve: resolve, reject: reject };
+    window.parent.postMessage({ jsonrpc: "2.0", id: id, method: method, params: params }, "*");
+  });
+}
+function sendNotification(method, params) {
+  window.parent.postMessage({ jsonrpc: "2.0", method: method, params: params }, "*");
+}
+function callTool(name, args) {
+  return sendRequest("tools/call", { name: name, arguments: args || {} });
+}
+function reportSize() {
+  var h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+  sendNotification("ui/notifications/size-changed", { height: h });
+}
+function applyTheme(ctx) {
+  if (!ctx) return;
+  if (ctx.theme) document.documentElement.style.colorScheme = ctx.theme;
+  if (ctx.styles && ctx.styles.variables) {
+    var vars = ctx.styles.variables;
+    for (var k in vars) if (vars[k]) document.documentElement.style.setProperty(k, vars[k]);
+  }
+}
+window.addEventListener("message", function (event) {
+  var msg = event.data;
+  if (!msg || msg.jsonrpc !== "2.0") return;
+  if (msg.id && _pending[msg.id]) {
+    var p = _pending[msg.id]; delete _pending[msg.id];
+    if (msg.error) p.reject(msg.error); else p.resolve(msg.result);
+    return;
+  }
+  if (msg.method === "ui/notifications/tool-result" || msg.method === "ui/notifications/tool-input") {
+    var sc = msg.params && msg.params.structuredContent;
+    if (sc && sc.accounts) render(sc);
+  }
+  if (msg.method === "ui/notifications/host-context-changed") applyTheme(msg.params);
+  if (msg.method === "ui/resource-teardown" && msg.id) {
+    window.parent.postMessage({ jsonrpc: "2.0", id: msg.id, result: {} }, "*");
+  }
+});
+
+// ── Panel logic ──
+var statusEl = document.getElementById("status");
+var listEl = document.getElementById("list");
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function fmtTime(sec) {
+  if (!sec) return "-";
+  var d = new Date(sec * 1000);
+  return (d.getMonth() + 1) + "月" + d.getDate() + "日 " +
+    String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+function resultText(r) {
+  if (!r || !r.content) return "";
+  return r.content.filter(function (c) { return c.type === "text"; })
+    .map(function (c) { return c.text; }).join("\n");
+}
+function setStatus(text, isErr) {
+  statusEl.textContent = text || "";
+  statusEl.className = "msg" + (isErr ? " err" : " muted");
+}
+function barRow(label, win) {
+  var row = el("div", "win");
+  row.appendChild(el("span", "lab", label));
+  var bar = el("div", "bar");
+  var fill = el("div", "fill" + (win.used >= 90 ? " bad" : win.used >= 70 ? " warn" : ""));
+  fill.style.width = Math.min(100, win.used) + "%";
+  bar.appendChild(fill);
+  row.appendChild(bar);
+  row.appendChild(el("span", "num", win.used + "%"));
+  row.appendChild(el("span", null, fmtTime(win.reset) + " 重置"));
+  return row;
+}
+function actionBtn(label, fn, danger) {
+  var b = el("button", danger ? "danger" : null, label);
+  b.addEventListener("click", function () { fn(b); });
+  return b;
+}
+function runAction(btn, toolName, args, doneText) {
+  var old = btn.textContent;
+  btn.disabled = true; btn.textContent = "处理中…";
+  setStatus("");
+  callTool(toolName, args).then(function (r) {
+    btn.disabled = false; btn.textContent = old;
+    var txt = resultText(r);
+    if (r && r.isError) { setStatus(txt || "操作失败", true); return; }
+    setStatus(doneText || txt.split("\n").pop() || "完成");
+    refresh();
+  }).catch(function (e) {
+    btn.disabled = false; btn.textContent = old;
+    setStatus("操作失败：" + (e && e.message ? e.message : e), true);
+  });
+}
+function render(data) {
+  listEl.innerHTML = "";
+  (data.accounts || []).forEach(function (a) {
+    var card = el("div", "acct");
+    var line = el("div", "line");
+    line.appendChild(el("span", "aid", a.id));
+    line.appendChild(el("span", "masked", a.account));
+    var chip = el("span", "chip" + (a.is_active ? " on" : a.state === "parked" ? " parked" : ""),
+      a.is_active ? "在用" : a.state === "parked" ? "停泊" : "备用");
+    line.appendChild(chip);
+    if (a.plan) line.appendChild(el("span", "chip", a.plan));
+    if (a.state === "parked") {
+      var reason = a.park_reason === "capped" ? "额度用满" :
+        a.park_reason === "invalid" ? "登录失效" : "手动停泊";
+      var note = reason + (a.parked_until ? " · 至 " + fmtTime(a.parked_until) : "");
+      line.appendChild(el("span", "note", note));
+    }
+    card.appendChild(line);
+    if (a.primary) card.appendChild(barRow("5 小时", a.primary));
+    if (a.secondary) card.appendChild(barRow("每周", a.secondary));
+    var acts = el("div", "actions");
+    if (!a.is_active && a.state !== "parked") {
+      acts.appendChild(actionBtn("切换到此账号", function (b) {
+        runAction(b, "pool_switch", { account: a.id }, "已切换到 " + a.id);
+      }));
+    }
+    if (a.state === "parked") {
+      acts.appendChild(actionBtn("放回备用", function (b) {
+        runAction(b, "pool_unpark", { account: a.id }, a.id + " 已放回备用");
+      }));
+    } else if (!a.is_active) {
+      acts.appendChild(actionBtn("停泊", function (b) {
+        runAction(b, "pool_park", { account: a.id }, a.id + " 已停泊");
+      }));
+    }
+    if (!a.is_active) {
+      var del = actionBtn("删除", function (b) {
+        if (b.dataset.arm) {
+          runAction(b, "pool_remove", { account: a.id }, a.id + " 已删除");
+        } else {
+          b.dataset.arm = "1"; b.textContent = "确认删除？"; b.className = "confirm";
+          setTimeout(function () {
+            delete b.dataset.arm; b.textContent = "删除"; b.className = "danger";
+          }, 4000);
+        }
+      }, true);
+      acts.appendChild(del);
+    }
+    if (acts.children.length) card.appendChild(acts);
+    listEl.appendChild(card);
+  });
+  reportSize();
+}
+function refresh() {
+  callTool("pool_data", {}).then(function (r) {
+    if (r && r.structuredContent) { render(r.structuredContent); setStatus(""); }
+    else setStatus("刷新失败", true);
+  }).catch(function () { setStatus("刷新失败", true); });
+}
+document.getElementById("refreshBtn").addEventListener("click", refresh);
+
+// ── Add-account flow ──
+var addBox = document.getElementById("addBox");
+var addMsg = document.getElementById("addMsg");
+document.getElementById("addBtn").addEventListener("click", function () {
+  addMsg.textContent = ""; addMsg.className = "msg";
+  document.getElementById("addCode").textContent = "…";
+  addBox.classList.add("open"); reportSize();
+  callTool("pool_add_begin", {}).then(function (r) {
+    var txt = resultText(r);
+    var m = txt.match(/USER_CODE:\s*(\S+)/);
+    document.getElementById("addCode").textContent = m ? m[1] : "(未取得代码)";
+    if (r && r.isError) { addMsg.textContent = txt; addMsg.className = "msg err"; }
+    reportSize();
+  }).catch(function (e) {
+    addMsg.textContent = "发起失败：" + (e && e.message ? e.message : e);
+    addMsg.className = "msg err";
+  });
+});
+document.getElementById("openAuthBtn").addEventListener("click", function () {
+  sendRequest("ui/open-link", { url: "https://auth.openai.com/codex/device" }).catch(function () {});
+});
+document.getElementById("finishAddBtn").addEventListener("click", function () {
+  var b = this; b.disabled = true;
+  callTool("pool_add_finish", {}).then(function (r) {
+    b.disabled = false;
+    var txt = resultText(r);
+    addMsg.textContent = txt.split("\n").filter(function (s) { return s.trim(); }).pop() || txt;
+    addMsg.className = "msg" + (r && r.isError ? " err" : "");
+    if (txt.indexOf("ADDED:") === 0 || txt.indexOf("ALREADY IN POOL") === 0) {
+      addBox.classList.remove("open");
+      setStatus("账号已加入号池");
+      refresh();
+    }
+    reportSize();
+  }).catch(function (e) {
+    b.disabled = false;
+    addMsg.textContent = "完成失败：" + (e && e.message ? e.message : e);
+    addMsg.className = "msg err";
+  });
+});
+document.getElementById("cancelAddBtn").addEventListener("click", function () {
+  addBox.classList.remove("open"); reportSize();
+});
+
+// ── Handshake ──
+if (typeof ResizeObserver !== "undefined") new ResizeObserver(reportSize).observe(document.body);
+sendRequest("ui/initialize", {
+  protocolVersion: "2026-01-26",
+  appInfo: { name: "gpt-account-pool", version: "1.0.0" },
+  appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] }
+}).then(function (result) {
+  applyTheme(result.hostContext || result);
+  sendNotification("ui/notifications/initialized", {});
+  reportSize();
+  // If no tool-result data arrives (e.g. opened standalone), self-load.
+  setTimeout(function () { if (!listEl.children.length) refresh(); }, 600);
+}).catch(function () {
+  setTimeout(function () { if (!listEl.children.length) refresh(); }, 600);
+});
+</script>
+</body>
+</html>
